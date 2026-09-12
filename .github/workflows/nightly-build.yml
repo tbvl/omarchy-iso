@@ -32,4 +32,4 @@ jobs:
         with:
           name: omarchy-iso-${{ github.run_number }}
           path: ./release/*.iso
-          retention-days: 1
+          retention-days: 3 # fork build: long enough to download a 6 GB artifact at leisure
