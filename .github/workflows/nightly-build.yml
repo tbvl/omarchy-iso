@@ -1,8 +1,9 @@
 name: Nightly ISO Build
 
+# Fork build branch: dispatch only. This branch is the fork's default branch, so a
+# schedule here would build nightly -- and its artifact cleanup below would delete the
+# fork ISO a dispatched run just uploaded.
 on:
-  schedule:
-    - cron: "1 0 * * *" # Daily at 00:01 UTC
   workflow_dispatch: # Allow manual triggering
 
 jobs:
