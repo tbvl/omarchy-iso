@@ -90,8 +90,9 @@ echo "jeff@example.com" >"$sandbox/media/user_email_address.txt"
 echo "false" >"$sandbox/media/user_encrypt_installation.txt"
 echo 'ssh-ed25519 AAAA jeff@host' >"$sandbox/media/authorized_keys"
 echo 'tskey-auth-kFAKEKEY' >"$sandbox/media/tailscale_authkey"
+printf '[connection]\ntype=wifi\n' >"$sandbox/media/network.nmconnection"
 run_load || fail "full file set loads"
-for file in user_configuration.json user_credentials.json user_full_name.txt user_email_address.txt user_encrypt_installation.txt authorized_keys tailscale_authkey; do
+for file in user_configuration.json user_credentials.json user_full_name.txt user_email_address.txt user_encrypt_installation.txt authorized_keys tailscale_authkey network.nmconnection; do
   [[ -f $sandbox/root/$file ]] || fail "full file set copies $file"
 done
 grep -q '^umount ' "$TEST_LOG" || fail "full file set unmounts the drive"
@@ -122,6 +123,7 @@ run_load || fail "required pair plus authorized_keys loads"
 [[ -f $sandbox/root/authorized_keys ]] || fail "authorized_keys is copied when present"
 [[ ! -e $sandbox/root/user_full_name.txt ]] || fail "absent optional files are not copied"
 [[ ! -e $sandbox/root/tailscale_authkey ]] || fail "absent tailscale_authkey is not copied"
+[[ ! -e $sandbox/root/network.nmconnection ]] || fail "absent network.nmconnection is not copied"
 pass "present optional files are copied, absent ones skipped"
 
 # A defer-provisioning marker replaces user_credentials.json: deferred-provisioning installs
@@ -161,9 +163,11 @@ attach_drive cidata
 write_required_pair
 : >"$sandbox/root/defer-provisioning"                       # leftover from a prior deferred-provisioning load
 echo 'old-keys' >"$sandbox/root/authorized_keys"
+echo 'old-network' >"$sandbox/root/network.nmconnection"
 run_load || fail "normal drive after a stale defer-provisioning load loads"
 [[ ! -e $sandbox/root/defer-provisioning ]] || fail "stale defer-provisioning marker is cleared"
 [[ ! -e $sandbox/root/authorized_keys ]] || fail "stale optional inputs are cleared"
+[[ ! -e $sandbox/root/network.nmconnection ]] || fail "stale network connection is cleared"
 pass "stale deferred-provisioning inputs are cleared before loading a normal drive"
 
 # A drive that isn't an autoinstall drive at all still clears stale inputs so

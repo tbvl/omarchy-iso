@@ -22,6 +22,7 @@ Phase ordering (full-disk and protected/pre-mounted):
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import os
 import re
@@ -1447,6 +1448,77 @@ def configure_login(ctx: InstallContext) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# configure_network: install the NetworkManager connection an autoinstall drive
+# supplied, so a machine with no cable -- a laptop on Wi-Fi -- is online on its
+# first boot instead of waiting at the Wi-Fi prompt. Omarchy already enables
+# NetworkManager; a root-only keyfile in system-connections is all it reads.
+# The live ISO itself stays offline: the install reads only the bundled mirror.
+# ─────────────────────────────────────────────────────────────────────────────
+
+NETWORK_CONNECTION_TARGET = "/etc/NetworkManager/system-connections/omarchy-autoinstall.nmconnection"
+
+
+def configure_network(ctx: InstallContext) -> None:
+    if ctx.network_connection_path is None:
+        return
+
+    text, name = _network_connection(ctx.network_connection_path)
+
+    # A keyfile on a target without NetworkManager would sit unread while the
+    # install reports success.
+    if not (ctx.target / "usr" / "lib" / "systemd" / "system" / "NetworkManager.service").exists():
+        raise RuntimeError("NetworkManager is not installed on the target")
+
+    info(f"› installing NetworkManager connection {name}")
+    keyfile = ctx.target / NETWORK_CONNECTION_TARGET.lstrip("/")
+    keyfile.parent.mkdir(parents=True, exist_ok=True)
+    keyfile.parent.chmod(0o700)
+    # NetworkManager ignores a keyfile that anyone but root can read, and this
+    # one usually carries a Wi-Fi passphrase: create it private, never widen it.
+    keyfile.touch(mode=0o600, exist_ok=True)
+    keyfile.chmod(0o600)
+    keyfile.write_text(text)
+
+
+def _network_connection(path: Path) -> tuple[str, str]:
+    """Read the autoinstall network.nmconnection: one NetworkManager keyfile,
+    installed byte for byte. Return its text and a name for the log.
+
+    Checked only as far as NetworkManager would otherwise drop the file
+    without a word -- no [connection] type, or a Wi-Fi connection without an
+    SSID -- because a keyfile NetworkManager ignores is a machine that comes
+    up offline with nothing on screen. Security, addressing and the rest are
+    NetworkManager's format to own.
+    """
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"{path} is not readable: {exc}") from exc
+
+    # GLib keyfile syntax: '=' only, case-sensitive keys, and no interpolation,
+    # so a '%' in a passphrase is just a '%'.
+    parser = configparser.ConfigParser(delimiters=("=",), interpolation=None, strict=False)
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:
+        raise RuntimeError(f"{path} is not a NetworkManager keyfile: {exc}") from exc
+
+    if not parser.has_section("connection"):
+        raise RuntimeError(f"{path} has no [connection] section")
+    kind = parser.get("connection", "type", fallback="").strip()
+    if not kind:
+        raise RuntimeError(f"{path} has no type in [connection]")
+    if kind in ("wifi", "802-11-wireless"):
+        ssid = parser.get("wifi", "ssid", fallback="") or parser.get("802-11-wireless", "ssid", fallback="")
+        if not ssid.strip():
+            raise RuntimeError(f"{path} is a Wi-Fi connection without an ssid")
+
+    name = parser.get("connection", "id", fallback="").strip() or path.name
+    return text, f"{name} ({kind})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # configure_ssh_access: make the installed machine reachable over SSH with the
 # keys an autoinstall drive supplied. A stock Omarchy install ships openssh but
 # leaves sshd disabled, and its firewall.sh opens only LocalSend and docker DNS,
@@ -1850,8 +1922,9 @@ def create_factory_snapshot(ctx: InstallContext) -> None:
 
 # Provisioning credentials staged for THIS deployment's first boot must not
 # survive into the factory image: a reset years later would otherwise hand the
-# next owner the original deployment's SSH keys or rejoin its tailnet, and a
-# stale LUKS key (dead after the first re-key) has no business lingering.
+# next owner the original deployment's SSH keys and Wi-Fi passphrase or rejoin
+# its tailnet, and a stale LUKS key (dead after the first re-key) has no
+# business lingering.
 # The mkinitcpio/cmdline drop-ins go with the keyfile — a reset rebuild would
 # otherwise fail on FILES pointing at a scrubbed path.
 FACTORY_SCRUB_PATHS = (
@@ -1863,6 +1936,7 @@ FACTORY_SCRUB_PATHS = (
     "etc/tailscale/authkey",
     "etc/systemd/system/omarchy-tailscale-join.service",
     "etc/systemd/system/multi-user.target.wants/omarchy-tailscale-join.service",
+    NETWORK_CONNECTION_TARGET.lstrip("/"),
 )
 
 

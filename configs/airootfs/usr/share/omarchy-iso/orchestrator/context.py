@@ -27,6 +27,7 @@ class InstallContext:
     arch_config_path: Path
     omarchy_install: dict[str, Any]
     defer_provisioning: bool = False
+    network_connection_path: Path | None = None
 
     target: Path = Path("/mnt")
     omarchy_path: Path = Path("/usr/share/omarchy")
@@ -116,6 +117,7 @@ class InstallContext:
             encrypt=_read_text(os.environ.get("OMARCHY_INSTALL_ENCRYPT_FILE")).lower() in ("true", "yes", "1"),
             authorized_keys_path=_optional_path(os.environ.get("OMARCHY_INSTALL_AUTHORIZED_KEYS_FILE")),
             tailscale_authkey_path=_optional_path(os.environ.get("OMARCHY_INSTALL_TAILSCALE_AUTHKEY_FILE")),
+            network_connection_path=_optional_path(os.environ.get("OMARCHY_INSTALL_NETWORK_CONNECTION_FILE")),
             user_configuration=user_configuration,
             user_credentials=user_credentials,
             arch_config_path=arch_config_path,
