@@ -12,6 +12,11 @@ set -euo pipefail
 
 [[ $(tty) == /dev/tty1 ]] || exit 0
 
+# Fork measurement build: timeline markers and snapshots (omarchy-measure).
+# Best effort, silent, never fatal.
+measure() { /usr/local/bin/omarchy-measure "$@" >/dev/null 2>&1 || true; }
+measure mark "automated_script start"
+
 export OMARCHY_MIRROR="$(cat /root/omarchy_mirror)"
 if [[ -f /root/omarchy_iso_ref ]]; then
   export OMARCHY_ISO_REF="$(cat /root/omarchy_iso_ref)"
@@ -94,11 +99,15 @@ cd /root
 # Autoinstall: a cidata drive carrying the configurator's own output files
 # stands in for the wizard. omarchy-cidata-load copies them into /root and
 # everything downstream runs the ordinary path against ordinary inputs.
+measure mark "cidata probe start"
 if /usr/local/bin/omarchy-cidata-load; then
+  measure mark "cidata loaded"
   echo "Autoinstall configuration found on cidata drive; skipping the configurator."
   export OMARCHY_UI_INTERACTIVE=no
 else
+  measure mark "wizard start"
   ./configurator
+  measure mark "wizard done"
 fi
 
 # Deferred-provisioning installs skip the celebration/reboot prompt and reboot on
@@ -116,6 +125,15 @@ fi
 # completion, then renders the final installed-time/reboot prompt itself.
 export OMARCHY_DASHBOARD_TTY="$(tty)"
 rm -f /run/omarchy-install/state.json
+
+# The boot is over by now: snapshot it in the background, without delaying the
+# install. The dashboard must not reboot on its own -- the install snapshot
+# below has to land on the cidata drive and the target first.
+measure capture boot &
+boot_capture_pid=$!
+export OMARCHY_UI_AUTO_REBOOT=no
+measure mark "dashboard start"
+set +e
 /usr/local/bin/omarchy-install-dashboard \
   "$OMARCHY_INSTALL_LOG_FILE" \
   /run/omarchy-install/state.json \
@@ -130,3 +148,12 @@ rm -f /run/omarchy-install/state.json
     --tailscale-authkey-file /root/tailscale_authkey \
     --network-connection-file /root/network.nmconnection \
     --defer-provisioning-file /root/defer-provisioning
+status=$?
+set -e
+measure mark "dashboard exit $status"
+wait "$boot_capture_pid" 2>/dev/null || true
+measure capture install
+# A failed install stays on its failure screen's shell; a finished one reboots
+# as the dashboard would have.
+((status == 0)) || exit "$status"
+reboot 2>/dev/null || systemctl reboot 2>/dev/null || true

@@ -1,0 +1,14 @@
+# Fork build only: sample the boot and the install once a second, from before
+# the splash to the reboot. See /usr/local/bin/omarchy-measure.
+[Unit]
+Description=Sample boot and install progress (fork measurement build)
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/omarchy-measure sample
+
+[Install]
+WantedBy=sysinit.target

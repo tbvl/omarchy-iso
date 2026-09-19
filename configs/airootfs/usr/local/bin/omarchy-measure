@@ -1,0 +1,159 @@
+#!/bin/bash
+#
+# Fork build only: record where the time goes between power-on and reboot.
+#
+# An unattended install on a MacBook Pro 16,2 sits on the Plymouth splash for
+# minutes before the install dashboard appears. tty2 cannot help during that
+# wait -- its getty is ordered after the same systemd-user-sessions.service as
+# tty1 -- so the machine collects the evidence itself:
+#
+#   omarchy-measure sample        1 Hz samples from early boot (a sysinit unit):
+#                                 activating units, CPU/iowait jiffies, blocked
+#                                 processes, USB read and NVMe write sectors
+#   omarchy-measure mark LABEL    a timestamped line in markers.tsv and the journal
+#   omarchy-measure capture NAME  snapshot units, jobs, journal, network and logs
+#                                 into /run/omarchy-measure/NAME, then copy the
+#                                 whole directory to the CIDATA partition
+#                                 (measure/<boot id>/) and, when the target is
+#                                 mounted, to /mnt/var/log/omarchy-measure/<boot id>/
+#
+# All times are seconds since kernel start (CLOCK_MONOTONIC, the journal's
+# short-monotonic clock), so every file lines up with every other.
+#
+# Best effort throughout: measuring must never fail or block an install.
+
+set -uo pipefail
+
+dir=/run/omarchy-measure
+mkdir -p "$dir"
+
+uptime_s() { cut -d' ' -f1 /proc/uptime; }
+
+mark() {
+  printf '%s\t%s\t%s\n' "$(uptime_s)" "$(date +%FT%T%z)" "$*" >>"$dir/markers.tsv"
+  logger -t omarchy-measure -- "$*" 2>/dev/null || true
+}
+
+sample() {
+  local n=0 max=${OMARCHY_MEASURE_MAX_SAMPLES:-10800} # 3 h at 1 Hz
+  local cpu stat_line disk mem load activating
+
+  printf 'uptime_s\tload1\tprocs_running\tprocs_blocked\tcpu_busy_jiffies\tcpu_iowait_jiffies\tcpu_total_jiffies\tmem_avail_kb\tusb_read_sectors\tnvme_write_sectors\tactivating_units\n' \
+    >"$dir/samples.tsv"
+  while ((n < max)); do
+    # cpu line: user nice system idle iowait irq softirq steal
+    cpu=$(awk '/^cpu /{busy=$2+$3+$4+$7+$8+$9; print busy "\t" $6 "\t" busy+$5+$6}' /proc/stat)
+    stat_line=$(awk '/^procs_running/{r=$2} /^procs_blocked/{b=$2} END{print r "\t" b}' /proc/stat)
+    disk=$(awk '$3 ~ /^sd[a-z]+$/ {r+=$6} $3 ~ /^nvme[0-9]+n[0-9]+$/ {w+=$10} END{print r+0 "\t" w+0}' /proc/diskstats)
+    mem=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    load=$(cut -d' ' -f1 /proc/loadavg)
+    activating=$(systemctl list-units --state=activating --no-legend --plain 2>/dev/null | awk '{printf "%s%s", sep, $1; sep=","}')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(uptime_s)" "$load" "$stat_line" "$cpu" "$mem" "$disk" "$activating" \
+      >>"$dir/samples.tsv"
+    n=$((n + 1))
+    sleep 1
+  done
+}
+
+# systemctl show prints one block per unit, blank-line separated, properties
+# in its own order. Flatten to: started, active, took, unit, state, result.
+unit_times() {
+  awk -F= '
+    function flush() {
+      if (id != "" && start > 0) {
+        took = (active > start) ? sprintf("%.3f", (active - start) / 1e6) : "-"
+        printf "%.3f\t%s\t%s\t%s\t%s\t%s\n", start / 1e6, (active > 0 ? sprintf("%.3f", active / 1e6) : "-"), took, id, state, result
+      }
+      id = ""; start = 0; active = 0; state = ""; result = ""
+    }
+    /^$/ { flush(); next }
+    $1 == "Id" { id = $2 }
+    $1 == "InactiveExitTimestampMonotonic" { start = $2 + 0 }
+    $1 == "ActiveEnterTimestampMonotonic" { active = $2 + 0 }
+    $1 == "ActiveState" { state = $2 }
+    $1 == "Result" { result = $2 }
+    END { flush() }
+  ' | sort -n | { printf 'started_s\tactive_s\ttook_s\tunit\tstate\tresult\n'; cat; }
+}
+
+persist() {
+  local boot dev="" label mnt=/run/omarchy-measure-cidata dest
+  boot=$(cut -c1-8 /proc/sys/kernel/random/boot_id)
+
+  for label in CIDATA cidata; do
+    [[ -e /dev/disk/by-label/$label ]] && { dev=/dev/disk/by-label/$label; break; }
+  done
+  if [[ -n $dev ]]; then
+    mkdir -p "$mnt"
+    if mount -o rw "$dev" "$mnt"; then
+      dest=$mnt/measure/$boot
+      mkdir -p "$dest"
+      # FAT keeps no owners or modes: copy contents, not attributes.
+      cp -r "$dir"/. "$dest"/
+      sync
+      umount "$mnt"
+      echo "measurements copied to $dev:/measure/$boot"
+    fi
+  fi
+
+  if mountpoint -q /mnt && [[ -d /mnt/var/log ]]; then
+    dest=/mnt/var/log/omarchy-measure/$boot
+    mkdir -p "$dest"
+    cp -r "$dir"/. "$dest"/
+    echo "measurements copied to $dest"
+  fi
+}
+
+capture() {
+  local name=${1:?capture needs a name} out file
+  out=$dir/$name
+  mkdir -p "$out"
+  mark "capture $name begin"
+
+  run() {
+    local file=$1
+    shift
+    timeout 60 "$@" >"$out/$file" 2>&1 || true
+  }
+
+  { uptime_s; date +%FT%T%z; } >"$out/when.txt"
+  cp /proc/cmdline "$out/cmdline.txt"
+  run jobs.txt systemctl list-jobs --no-pager
+  run analyze-time.txt systemd-analyze time
+  run analyze-blame.txt systemd-analyze blame --no-pager
+  run critical-chain-getty-tty1.txt systemd-analyze critical-chain getty@tty1.service --no-pager
+  run critical-chain-user-sessions.txt systemd-analyze critical-chain systemd-user-sessions.service --no-pager
+  run analyze-plot.svg systemd-analyze plot
+  # systemd-analyze refuses while jobs are queued ("bootup is not yet
+  # finished"), and offline pacman-init waits on time-sync.target forever,
+  # so read every unit's own timestamps as well.
+  systemctl show --all --no-pager \
+    -p Id,ActiveState,Result,InactiveExitTimestampMonotonic,ActiveEnterTimestampMonotonic '*' 2>/dev/null |
+    unit_times >"$out/unit-times.tsv"
+  run journal.txt journalctl -b -o short-monotonic --no-pager
+  run networkctl.txt networkctl list --no-pager
+  run networkctl-status.txt networkctl status --all --no-pager
+  run ip-addr.txt ip -details addr
+  run cloud-init-status.txt cloud-init status --long
+  run cloud-init-analyze.txt cloud-init analyze show
+  run lsblk.txt lsblk -o NAME,SIZE,TYPE,TRAN,MODEL,LABEL,FSTYPE,MOUNTPOINTS
+  run findmnt.txt findmnt
+  run free.txt free -m
+  run ps.txt ps auxww --sort=-pcpu
+  for file in /usr/share/omarchy-iso/build-info \
+    /run/cloud-init/ds-identify.log /run/cloud-init/cloud-init-generator.log \
+    /var/log/cloud-init.log /var/log/cloud-init-output.log \
+    /var/log/omarchy-install.log /run/omarchy-install/state.json /var/log/archinstall/install.log; do
+    [[ -f $file ]] && cp "$file" "$out/"
+  done
+
+  mark "capture $name end"
+  persist
+}
+
+case "${1:-}" in
+  sample) sample ;;
+  mark) shift; mark "$@" ;;
+  capture) shift; capture "$@" ;;
+  *) echo "usage: omarchy-measure sample | mark LABEL | capture NAME" >&2; exit 2 ;;
+esac
