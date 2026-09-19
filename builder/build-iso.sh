@@ -210,6 +210,23 @@ mapfile -t all_packages < <(
   printf '%s\n' "${all_packages[@]}" | sed 's/^broadcom-wl$/broadcom-wl-dkms/' | sort -u
 )
 
+# Fork build only. arch-mact2 dropped apple-bcm-firmware on 2026-09-16 in favour of
+# apple-bcm-firmware-fetcher, which reads the firmware from an on-disk macOS volume --
+# the volume a full-disk install erases. Omarchy's T2 hardware script still installs
+# apple-bcm-firmware, so "target not found" fails every build. Pin the last published
+# build, the one the 4.0.3 ISO ships, from the arch-mact2 GitHub release mirror by
+# digest, and keep it out of the -Syw transaction that can no longer resolve it.
+declare -a pinned_package_files=()
+if printf '%s\n' "${all_packages[@]}" | grep -Fxq apple-bcm-firmware; then
+  pinned_file=apple-bcm-firmware-14.0-1-any.pkg.tar.zst
+  curl -fsSL --retry 3 -o "$offline_mirror_dir/$pinned_file" \
+    "https://github.com/NoaHimesaka1873/arch-mact2-mirror/releases/download/release/$pinned_file"
+  echo "f2cd47d9e3fb9658f16997b2d9ace3033b57925b8c6ddd86ccc3d07d0c3e9559  $offline_mirror_dir/$pinned_file" |
+    sha256sum -c -
+  pinned_package_files+=("$pinned_file")
+  mapfile -t all_packages < <(printf '%s\n' "${all_packages[@]}" | grep -Fxv apple-bcm-firmware)
+fi
+
 # With --local-source we already built these omarchy* packages directly into
 # the mirror; strip them from the pacman -Syw list so it doesn't try to fetch
 # the published versions on top.
@@ -250,6 +267,7 @@ if ! resolved_package_files="$(
   exit 1
 fi
 mapfile -t required_package_files <<< "$resolved_package_files"
+required_package_files+=("${pinned_package_files[@]}")
 
 # The online transaction intentionally excludes packages built from the local
 # checkouts. Add those exact artifacts back to the keep-set after verifying
